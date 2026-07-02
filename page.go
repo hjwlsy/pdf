@@ -11,6 +11,9 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // A Page represent a single page in a PDF file.
@@ -80,6 +83,20 @@ func (r *Reader) GetPlainText() (reader io.Reader, err error) {
 		buf.WriteString(text)
 	}
 	return &buf, nil
+}
+
+// GetPlainTextPro returns all text in the PDF file with common PDF extraction
+// artifacts normalized.
+func (r *Reader) GetPlainTextPro() (reader io.Reader, err error) {
+	reader, err = r.GetPlainText()
+	if err != nil {
+		return
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return &bytes.Buffer{}, err
+	}
+	return bytes.NewBufferString(normalizePdfExtractText(string(data))), nil
 }
 
 // GetStyledTexts returns list all sentences in an array, that are included styles
@@ -200,6 +217,11 @@ func (f Font) Encoder() TextEncoding {
 }
 
 func (f Font) getEncoder() TextEncoding {
+	if toUnicode := f.V.Key("ToUnicode"); toUnicode.Kind() == Stream {
+		if m := readCmap(toUnicode); m != nil {
+			return m
+		}
+	}
 	enc := f.V.Key("Encoding")
 	switch enc.Kind() {
 	case Name:
@@ -605,6 +627,39 @@ func (p Page) GetPlainText(fonts map[string]*Font) (result string, err error) {
 		}
 	})
 	return textBuilder.String(), nil
+}
+
+// GetPlainTextPro returns the page's plain text with common PDF extraction
+// artifacts normalized. Fonts can be passed in to improve parsing performance
+// or left nil.
+func (p Page) GetPlainTextPro(fonts map[string]*Font) (result string, err error) {
+	result, err = p.GetPlainText(fonts)
+	if err != nil {
+		return
+	}
+	result = normalizePdfExtractText(result)
+	return
+}
+
+// normalizePdfExtractText cleans text extracted from PDF content streams.
+func normalizePdfExtractText(text string) string {
+	// Remove NUL bytes that can appear in extracted PDF text.
+	text = strings.ReplaceAll(text, "\x00", "")
+	// Apply compatibility normalization, for example Kangxi radicals to the
+	// corresponding CJK ideographs.
+	text = norm.NFKC.String(text)
+	// Drop invisible control characters while preserving layout separators.
+	text = strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return r
+		}
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, text)
+	return strings.TrimSpace(text)
 }
 
 // Column represents the contents of a column
